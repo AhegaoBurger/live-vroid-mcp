@@ -5,12 +5,30 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import WebSocket from "ws";
 
+// Types
+interface AvatarCommand {
+  clip: string;
+  emotion: string;
+  lookAt: string;
+}
+
+interface AnimationStep {
+  clip: string;
+  emotion?: string;
+  lookAt?: string;
+  delay?: number;
+}
+
+interface EmotionKeywords {
+  [key: string]: string[];
+}
+
 // WebSocket connection to Godot
-let godotSocket = null;
-let socketReady = false;
+let godotSocket: WebSocket | null = null;
+let socketReady: boolean = false;
 
 // Configuration
-const GODOT_WS_URL = process.env.GODOT_WS_URL || "ws://localhost:8080";
+const GODOT_WS_URL: string = process.env.GODOT_WS_URL || "ws://localhost:8080";
 
 // Available animations from Mixamo
 const ANIMATIONS = [
@@ -29,7 +47,7 @@ const ANIMATIONS = [
   "point",
   "clap",
   "bow",
-];
+] as const;
 
 // Available emotions
 const EMOTIONS = [
@@ -43,38 +61,53 @@ const EMOTIONS = [
   "bored",
   "shy",
   "confident",
-];
+] as const;
 
 // Look at targets
-const LOOK_TARGETS = ["user", "away", "down", "up", "left", "right"];
+const LOOK_TARGETS = ["user", "away", "down", "up", "left", "right"] as const;
 
-// Connect to Godot WebSocket
-function connectToGodot() {
-  console.error(`Connecting to Godot at ${GODOT_WS_URL}...`);
+// Type definitions for the constants
+type Animation = (typeof ANIMATIONS)[number];
+type Emotion = (typeof EMOTIONS)[number];
+type LookTarget = (typeof LOOK_TARGETS)[number];
 
-  godotSocket = new WebSocket(GODOT_WS_URL);
+// Connect to Godot WebSocket (non-blocking)
+function connectToGodot(): void {
+  console.error(`Attempting to connect to Godot at ${GODOT_WS_URL}...`);
 
-  godotSocket.on("open", () => {
-    console.error("Connected to Godot WebSocket");
-    socketReady = true;
-  });
+  try {
+    godotSocket = new WebSocket(GODOT_WS_URL);
 
-  godotSocket.on("close", () => {
-    console.error("Godot WebSocket disconnected, attempting reconnect...");
+    godotSocket.on("open", () => {
+      console.error("Connected to Godot WebSocket");
+      socketReady = true;
+    });
+
+    godotSocket.on("close", () => {
+      console.error("Godot WebSocket disconnected");
+      socketReady = false;
+      // Don't auto-reconnect to avoid blocking the server
+    });
+
+    godotSocket.on("error", (err: Error) => {
+      console.error("Godot WebSocket error:", err.message);
+      socketReady = false;
+    });
+  } catch (error) {
+    console.error(
+      "Failed to create WebSocket connection:",
+      (error as Error).message,
+    );
     socketReady = false;
-    setTimeout(connectToGodot, 5000);
-  });
-
-  godotSocket.on("error", (err) => {
-    console.error("Godot WebSocket error:", err.message);
-    socketReady = false;
-  });
+  }
 }
 
 // Send command to Godot
-function sendToGodot(command) {
+function sendToGodot(command: AvatarCommand): AvatarCommand {
   if (!socketReady || !godotSocket) {
-    throw new Error("WebSocket not connected to Godot");
+    throw new Error(
+      "WebSocket not connected to Godot. Make sure Godot is running and WebSocket server is active.",
+    );
   }
 
   godotSocket.send(JSON.stringify(command));
@@ -82,11 +115,11 @@ function sendToGodot(command) {
 }
 
 // Parse natural language to animation commands
-function parseIntent(text) {
+function parseIntent(text: string): AvatarCommand {
   const lower = text.toLowerCase();
 
   // Animation detection
-  let clip = "idle";
+  let clip: Animation = "idle";
   for (const anim of ANIMATIONS) {
     if (lower.includes(anim)) {
       clip = anim;
@@ -95,8 +128,8 @@ function parseIntent(text) {
   }
 
   // Emotion detection
-  let emotion = "neutral";
-  const emotionMap = {
+  let emotion: Emotion = "neutral";
+  const emotionMap: EmotionKeywords = {
     happy: ["happy", "joy", "glad", "pleased", "delighted", "cheerful"],
     sad: ["sad", "unhappy", "down", "depressed", "blue"],
     angry: ["angry", "mad", "furious", "annoyed", "irritated"],
@@ -108,14 +141,14 @@ function parseIntent(text) {
   };
 
   for (const [emo, keywords] of Object.entries(emotionMap)) {
-    if (keywords.some((keyword) => lower.includes(keyword))) {
-      emotion = emo;
+    if (keywords.some((keyword: string) => lower.includes(keyword))) {
+      emotion = emo as Emotion;
       break;
     }
   }
 
   // Look direction
-  let lookAt = "user";
+  let lookAt: LookTarget = "user";
   if (lower.includes("look away") || lower.includes("don't look")) {
     lookAt = "away";
   } else if (lower.includes("look down")) {
@@ -142,23 +175,26 @@ server.registerTool(
     inputSchema: {
       clip: z
         .enum(ANIMATIONS)
-        .describe(`Animation clip to play`)
+        .describe("Animation clip to play")
         .default("idle"),
       emotion: z
         .enum(EMOTIONS)
-        .describe(`Facial expression`)
-        .optional()
+        .describe("Facial expression")
         .default("neutral"),
-      lookAt: z
-        .enum(LOOK_TARGETS)
-        .describe(`Where to look`)
-        .optional()
-        .default("user"),
+      lookAt: z.enum(LOOK_TARGETS).describe("Where to look").default("user"),
     },
   },
-  async ({ clip, emotion = "neutral", lookAt = "user" }) => {
+  async ({
+    clip,
+    emotion = "neutral",
+    lookAt = "user",
+  }: {
+    clip: Animation;
+    emotion?: Emotion;
+    lookAt?: LookTarget;
+  }) => {
     try {
-      const command = { clip, emotion, lookAt };
+      const command: AvatarCommand = { clip, emotion, lookAt };
       sendToGodot(command);
 
       return {
@@ -174,7 +210,7 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: `Error: ${error.message}`,
+            text: `Error: ${(error as Error).message}`,
           },
         ],
         isError: true,
@@ -196,7 +232,7 @@ server.registerTool(
         .describe("Natural language describing action, emotion, or both"),
     },
   },
-  async ({ text }) => {
+  async ({ text }: { text: string }) => {
     try {
       const command = parseIntent(text);
       sendToGodot(command);
@@ -214,7 +250,7 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: `Error: ${error.message}`,
+            text: `Error: ${(error as Error).message}`,
           },
         ],
         isError: true,
@@ -245,16 +281,16 @@ server.registerTool(
         .describe("Array of animation commands with optional delays"),
     },
   },
-  async ({ sequence }) => {
+  async ({ sequence }: { sequence: AnimationStep[] }) => {
     try {
-      const results = [];
+      const results: string[] = [];
 
       for (const step of sequence) {
         if (step.delay) {
           await new Promise((resolve) => setTimeout(resolve, step.delay));
         }
 
-        const command = {
+        const command: AvatarCommand = {
           clip: step.clip,
           emotion: step.emotion || "neutral",
           lookAt: step.lookAt || "user",
@@ -277,7 +313,7 @@ server.registerTool(
         content: [
           {
             type: "text",
-            text: `Error: ${error.message}`,
+            text: `Error: ${(error as Error).message}`,
           },
         ],
         isError: true,
@@ -287,17 +323,43 @@ server.registerTool(
 );
 
 // Start server
-async function main() {
-  // Connect to Godot first
-  connectToGodot();
+async function main(): Promise<void> {
+  try {
+    console.error("Live-Vroid MCP Server starting...");
 
-  // Start MCP server
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Live-Vroid MCP Server started");
+    // Start MCP server first
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("MCP Server connected successfully");
+
+    // Try to connect to Godot (non-blocking)
+    connectToGodot();
+
+    console.error("Live-Vroid MCP Server ready");
+  } catch (error) {
+    console.error("Fatal error during server startup:", error);
+    process.exit(1);
+  }
 }
 
-main().catch((error) => {
+// Handle process termination gracefully
+process.on("SIGINT", () => {
+  console.error("Shutting down gracefully...");
+  if (godotSocket) {
+    godotSocket.close();
+  }
+  process.exit(0);
+});
+
+process.on("SIGTERM", () => {
+  console.error("Shutting down gracefully...");
+  if (godotSocket) {
+    godotSocket.close();
+  }
+  process.exit(0);
+});
+
+main().catch((error: Error) => {
   console.error("Fatal error:", error);
   process.exit(1);
 });
