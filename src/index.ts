@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import WebSocket from "ws";
+import { GodotConnection } from "./godot_connection.js";
 
 // Types
 interface AvatarCommand {
@@ -22,13 +22,6 @@ interface AnimationStep {
 interface EmotionKeywords {
   [key: string]: string[];
 }
-
-// WebSocket connection to Godot
-let godotSocket: WebSocket | null = null;
-let socketReady: boolean = false;
-
-// Configuration
-const GODOT_WS_URL: string = process.env.GODOT_WS_URL || "ws://localhost:8080";
 
 // Available animations from Mixamo
 const ANIMATIONS = [
@@ -71,47 +64,15 @@ type Animation = (typeof ANIMATIONS)[number];
 type Emotion = (typeof EMOTIONS)[number];
 type LookTarget = (typeof LOOK_TARGETS)[number];
 
-// Connect to Godot WebSocket (non-blocking)
-function connectToGodot(): void {
-  console.error(`Attempting to connect to Godot at ${GODOT_WS_URL}...`);
+// Singleton Godot connection instance
+let godotConnection: GodotConnection | null = null;
 
-  try {
-    godotSocket = new WebSocket(GODOT_WS_URL);
-
-    godotSocket.on("open", () => {
-      console.error("Connected to Godot WebSocket");
-      socketReady = true;
-    });
-
-    godotSocket.on("close", () => {
-      console.error("Godot WebSocket disconnected");
-      socketReady = false;
-      // Don't auto-reconnect to avoid blocking the server
-    });
-
-    godotSocket.on("error", (err: Error) => {
-      console.error("Godot WebSocket error:", err.message);
-      socketReady = false;
-    });
-  } catch (error) {
-    console.error(
-      "Failed to create WebSocket connection:",
-      (error as Error).message,
-    );
-    socketReady = false;
+function getGodotConnection(): GodotConnection {
+  if (!godotConnection) {
+    const url = process.env.GODOT_WS_URL || "ws://localhost:8080";
+    godotConnection = new GodotConnection(url, 10000, 3, 2000);
   }
-}
-
-// Send command to Godot
-function sendToGodot(command: AvatarCommand): AvatarCommand {
-  if (!socketReady || !godotSocket) {
-    throw new Error(
-      "WebSocket not connected to Godot. Make sure Godot is running and WebSocket server is active.",
-    );
-  }
-
-  godotSocket.send(JSON.stringify(command));
-  return command;
+  return godotConnection;
 }
 
 // Parse natural language to animation commands
@@ -194,8 +155,11 @@ server.registerTool(
     lookAt?: LookTarget;
   }) => {
     try {
+      const godot = getGodotConnection();
       const command: AvatarCommand = { clip, emotion, lookAt };
-      sendToGodot(command);
+
+      // Send command through the Godot connection
+      const result = await godot.sendCommand("avatar_control", command);
 
       return {
         content: [
@@ -234,8 +198,11 @@ server.registerTool(
   },
   async ({ text }: { text: string }) => {
     try {
+      const godot = getGodotConnection();
       const command = parseIntent(text);
-      sendToGodot(command);
+
+      // Send command through the Godot connection
+      const result = await godot.sendCommand("avatar_control", command);
 
       return {
         content: [
@@ -283,6 +250,7 @@ server.registerTool(
   },
   async ({ sequence }: { sequence: AnimationStep[] }) => {
     try {
+      const godot = getGodotConnection();
       const results: string[] = [];
 
       for (const step of sequence) {
@@ -296,7 +264,7 @@ server.registerTool(
           lookAt: step.lookAt || "user",
         };
 
-        sendToGodot(command);
+        await godot.sendCommand("avatar_control", command);
         results.push(`${command.clip} (${command.emotion})`);
       }
 
@@ -332,8 +300,16 @@ async function main(): Promise<void> {
     await server.connect(transport);
     console.error("MCP Server connected successfully");
 
-    // Try to connect to Godot (non-blocking)
-    connectToGodot();
+    // Try to connect to Godot
+    try {
+      const godot = getGodotConnection();
+      await godot.connect();
+      console.error("Successfully connected to Godot WebSocket server");
+    } catch (error) {
+      const err = error as Error;
+      console.warn(`Could not connect to Godot: ${err.message}`);
+      console.warn("Will retry connection when commands are executed");
+    }
 
     console.error("Live-Vroid MCP Server ready");
   } catch (error) {
@@ -345,17 +321,15 @@ async function main(): Promise<void> {
 // Handle process termination gracefully
 process.on("SIGINT", () => {
   console.error("Shutting down gracefully...");
-  if (godotSocket) {
-    godotSocket.close();
-  }
+  const godot = getGodotConnection();
+  godot.disconnect();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   console.error("Shutting down gracefully...");
-  if (godotSocket) {
-    godotSocket.close();
-  }
+  const godot = getGodotConnection();
+  godot.disconnect();
   process.exit(0);
 });
 
